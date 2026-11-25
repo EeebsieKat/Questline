@@ -281,7 +281,12 @@ export class FirebaseSync {
       for (const u of updates) Y.applyUpdate(scratch, u, "firebase");
       const svCloud = Y.encodeStateVector(scratch);
       const missing = Y.encodeStateAsUpdate(this.ws.doc, svCloud);
-      if (missing.length > 2) this.queueUpdate(missing);
+      if (missing.length > 2) {
+        // Queue directly: queueUpdate() no-ops until this.connected flips
+        // true a few lines below, and dropping this initial catch-up parks
+        // the cloud status on "syncing" forever with nothing to send.
+        this.queue.push(missing);
+      }
 
       // future local edits → queue
       this.ws.doc.on("update", this.onDocUpdate);
@@ -330,8 +335,14 @@ export class FirebaseSync {
   }
 
   async flushNow() {
-    if (this.destroyed || !this.connected || !this.queue.length || !this.email) return;
+    if (this.destroyed || !this.connected || !this.email) return;
     if (this.meta && !this.collaborators.includes(this.email)) return;
+    if (!this.queue.length) {
+      // Nothing pending — the initial catch-up either went up already or
+      // there was nothing to send. Resolve "syncing" instead of stalling.
+      this.hooks.onState("synced");
+      return;
+    }
     const batch = this.queue;
     this.queue = [];
     try {
