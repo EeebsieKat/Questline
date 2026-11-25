@@ -91,14 +91,18 @@ Your board is live at `https://<username>.github.io/<repo>/`.
 5. **Firestore Database → Create database** (production mode, any region).
 6. **Firestore → Rules** → paste the contents of
    [`firestore.rules`](./firestore.rules) → Publish.
-7. Open Questline → **Settings → Cloud sync** → paste the config → **Save &
-   connect**. You're now the owner.
+7. **Recommended: bake it in once** — paste the `firebaseConfig` object
+   into `src/firebase-config.ts`, commit and push. From then on nobody
+   pastes anything: visitors click **Sign in with Google** in the top bar.
+   (Per-browser alternative: **Settings → Cloud sync** → paste → **Save &
+   connect**.)
 8. **Share** → invite teammates by Google email. They open the same link,
    sign in with Google, and get edit access; anyone else is blocked.
 
 Notes:
-- The config lives in each collaborator's browser (localStorage). Firebase
-  web configs are public identifiers — security comes from the rules above.
+- The config is baked into the build (`src/firebase-config.ts`) or pasted
+  per-browser (localStorage). Firebase web configs are public identifiers —
+  security comes from the rules above.
 - Firestore stores an append-only log of Yjs updates (auto-compacted).
   Free-tier quotas (≈50k reads / 20k writes per day) are far more than a
   small team needs.

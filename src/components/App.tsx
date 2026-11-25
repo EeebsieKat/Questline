@@ -4,6 +4,7 @@ import { useApp } from "../lib/store";
 import { Workspace } from "../lib/workspace";
 import { bootstrapStarter } from "../lib/bootstrap";
 import { FirebaseSync, parseFirebaseConfig } from "../lib/firebase-sync";
+import { FIREBASE_CONFIG } from "../firebase-config";
 import { uid } from "../lib/util";
 import { Button, Input } from "./ui";
 import { TopBar } from "./TopBar";
@@ -17,26 +18,33 @@ import { Toasts } from "./Toasts";
 import { CloudBlockedNotice } from "./CloudBlockedNotice";
 
 // ── firebase bootstrap (shared by App init and Settings) ─────
-export async function connectFirebase(ws: Workspace) {
-  const cfgRaw = localStorage.getItem("ql-firebase");
+export async function connectFirebase(ws: Workspace, opts?: { autoSignIn?: boolean }) {
+  // A config pasted in Settings overrides the baked-in deployment config.
+  const pasted = localStorage.getItem("ql-firebase");
+  let cfg: Record<string, string> | null = pasted ? parseFirebaseConfig(pasted) : null;
+  if (!cfg && FIREBASE_CONFIG) cfg = { ...FIREBASE_CONFIG };
   const store = useApp.getState();
-  if (!cfgRaw) {
+  if (pasted && !cfg) {
+    store.setCloud("error", "The saved Firebase config is invalid — re-paste it in Settings.");
+    return;
+  }
+  if (!cfg) {
     store.setFirebase(null);
     store.setCloud("off");
     return;
   }
-  const cfg = parseFirebaseConfig(cfgRaw);
-  if (!cfg) {
-    store.setCloud("error", "The saved Firebase config is invalid — re-paste it in Settings.");
-    return;
-  }
   store.setCloud("connecting");
-  const fb = await FirebaseSync.connect(cfg, ws, {
-    onState: (s, msg) => useApp.getState().setCloud(s, msg),
-    onUser: (email) => useApp.getState().setSync({ email }),
-    onMeta: (meta) => useApp.getState().setCloudMeta(meta),
-    getPeers: () => useApp.getState().sync.peers,
-  });
+  const fb = await FirebaseSync.connect(
+    cfg,
+    ws,
+    {
+      onState: (s, msg) => useApp.getState().setCloud(s, msg),
+      onUser: (email) => useApp.getState().setSync({ email }),
+      onMeta: (meta) => useApp.getState().setCloudMeta(meta),
+      getPeers: () => useApp.getState().sync.peers,
+    },
+    !!opts?.autoSignIn,
+  );
   if (fb) useApp.getState().setFirebase(fb);
 }
 
@@ -234,8 +242,9 @@ export function App() {
       useApp.getState().setActiveBoard(last && ws.boardsMap.get(last) ? last : root);
 
       setGate("ready");
-      const cfg = localStorage.getItem("ql-firebase");
-      if (cfg) connectFirebase(ws);
+      // Baked-in deployment config or a pasted one — either way, connect.
+      // No auto sign-in popup on load; the top-bar pill handles that.
+      if (localStorage.getItem("ql-firebase") || FIREBASE_CONFIG) connectFirebase(ws);
     })();
 
     return () => {

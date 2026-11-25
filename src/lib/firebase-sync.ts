@@ -107,6 +107,9 @@ export class FirebaseSync {
   private email: string | null = null;
   private connected = false;
   private destroyed = false;
+  private started = false;
+  private invitedPending = false;
+  private docListeners = false;
   private meta: CloudMeta | null = null;
 
   user: any = null;
@@ -126,13 +129,14 @@ export class FirebaseSync {
     config: Record<string, string>,
     ws: Workspace,
     hooks: FirebaseHooks,
+    autoSignIn = false,
   ): Promise<FirebaseSync | null> {
     const sync = new FirebaseSync(ws, hooks);
-    const ok = await sync.init(config);
+    const ok = await sync.init(config, autoSignIn);
     return ok ? sync : null;
   }
 
-  private async init(config: Record<string, string>): Promise<boolean> {
+  private async init(config: Record<string, string>, autoSignIn: boolean): Promise<boolean> {
     try {
       this.hooks.onState("connecting");
       this.fb = await import("firebase/app");
@@ -153,32 +157,30 @@ export class FirebaseSync {
       this.fsm = fsMod;
 
       // ── auth ──────────────────────────────────────────────
-      const ensureUser = async (): Promise<any> => {
-        if (this.auth.currentUser) return this.auth.currentUser;
-        const provider = new authMod.GoogleAuthProvider();
-        provider.setCustomParameters({ prompt: "select_account" });
-        try {
-          const cred = await authMod.signInWithPopup(this.auth, provider);
-          return cred.user;
-        } catch (e: any) {
-          if (e?.code === "auth/popup-blocked" || e?.code === "auth/operation-not-supported-in-this-environment") {
-            await authMod.signInWithRedirect(this.auth, provider);
-            return null; // page will reload into redirect result
-          }
-          if (e?.code === "auth/unauthorized-domain") {
-            this.hooks.onState(
-              "error",
-              `This domain (${location.host}) is not authorized in Firebase Auth. Add it under Authentication → Settings → Authorized domains.`,
-            );
-            return null;
-          }
-          if (e?.code === "auth/popup-closed-by-user") {
-            this.hooks.onState("signed-out", "Sign in to sync this workspace to the cloud.");
-            return null;
-          }
-          throw e;
+      // Session watcher — drives startSync() whenever a user appears
+      // (first sign-in, returning session, account switch).
+      authMod.onAuthStateChanged(this.auth, (u: any) => {
+        if (this.destroyed) return;
+        if (u) {
+          this.user = u;
+          this.email = u.email ?? null;
+          this.hooks.onUser(this.email, u.displayName);
+          void this.startSync();
+        } else {
+          this.user = null;
+          this.email = null;
+          this.hooks.onUser(null, null);
+          const wasStarted = this.started;
+          this.started = false;
+          this.connected = false;
+          this.hooks.onState(
+            "signed-out",
+            wasStarted
+              ? "Signed out — your board is still saved locally."
+              : "Sign in with Google to sync this board to the cloud.",
+          );
         }
-      };
+      });
 
       // handle a returning redirect
       try {
@@ -187,21 +189,95 @@ export class FirebaseSync {
         /* noop */
       }
 
-      let user = this.auth.currentUser;
-      if (!user) user = await ensureUser();
-      if (!user) return true; // stays signed-out; user can retry via UI
+      if (this.auth.currentUser) {
+        // session already alive (local persistence or redirect) — go live
+        await this.startSync();
+      } else if (autoSignIn) {
+        // Settings flow: the user just clicked "Save & connect"
+        const user = await this.ensureUser();
+        if (user) await this.startSync();
+      } else {
+        // Baked-in config on page load: no surprise popups — the top-bar
+        // pill shows "Sign in with Google" and waits for a click.
+        this.hooks.onState(
+          "signed-out",
+          "Sign in with Google to sync this board to the cloud.",
+        );
+      }
+      return true;
+    } catch (e: any) {
+      console.error("[questline] firebase init failed", e);
+      const msg =
+        e?.code === "permission-denied"
+          ? "Permission denied by Firestore rules — make sure you published the Questline rules and enabled Google sign-in (see README)."
+          : e?.message || String(e);
+      this.hooks.onState("error", msg);
+      return true; // connected enough to surface the error state
+    }
+  }
 
+  /** User-gesture entry point — the top-bar pill and Settings call this. */
+  async signIn(): Promise<void> {
+    if (this.destroyed) return;
+    try {
+      if (!this.auth.currentUser) {
+        this.hooks.onState("connecting");
+        const user = await this.ensureUser();
+        if (!user) return; // ensureUser already set the right state
+      }
+      await this.startSync();
+    } catch (e: any) {
+      this.hooks.onState("error", e?.message || String(e));
+    }
+  }
+
+  private async ensureUser(): Promise<any> {
+    if (this.auth.currentUser) return this.auth.currentUser;
+    const provider = new this.authm.GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: "select_account" });
+    try {
+      const cred = await this.authm.signInWithPopup(this.auth, provider);
+      return cred.user;
+    } catch (e: any) {
+      if (e?.code === "auth/popup-blocked" || e?.code === "auth/operation-not-supported-in-this-environment") {
+        await this.authm.signInWithRedirect(this.auth, provider);
+        return null; // page will reload into redirect result
+      }
+      if (e?.code === "auth/unauthorized-domain") {
+        this.hooks.onState(
+          "error",
+          `This domain (${location.host}) is not authorized in Firebase Auth. Add it under Authentication → Settings → Authorized domains.`,
+        );
+        return null;
+      }
+      if (e?.code === "auth/popup-closed-by-user") {
+        this.hooks.onState("signed-out", "Sign in to sync this workspace to the cloud.");
+        return null;
+      }
+      throw e;
+    }
+  }
+
+  /** Everything after auth: claim/read the workspace, load & push updates. */
+  private async startSync(): Promise<void> {
+    if (this.started || this.destroyed) return;
+    const user = this.auth.currentUser;
+    if (!user) return;
+    this.started = true;
+    try {
       this.user = user;
       this.email = user.email ?? null;
       this.hooks.onUser(this.email, user.displayName);
       this.hooks.onState("connecting");
 
-      authMod.onAuthStateChanged(this.auth, (u: any) => {
-        if (!u && !this.destroyed) {
-          this.hooks.onUser(null, null);
-          this.hooks.onState("signed-out");
-        }
-      });
+      // Re-attaching is safe after a sign-out → sign-in cycle.
+      try {
+        this.ws.doc.off("update", this.onDocUpdate);
+      } catch {
+        /* noop */
+      }
+      this.unsubMeta?.();
+      this.unsubMeta = null;
 
       // ── workspace doc: read or claim ──────────────────────
       const wref = this.fbDocRef(`questline/${this.ws.id}`);
@@ -236,6 +312,13 @@ export class FirebaseSync {
             this.ws.setRoomSecret(null);
           } else {
             this.ws.setRoomSecret(this.meta.roomSecret);
+            // Just got invited while sitting on the "not on this board"
+            // screen — start syncing without waiting for a reload.
+            if (this.invitedPending && !this.destroyed) {
+              this.invitedPending = false;
+              this.started = false;
+              void this.startSync();
+            }
           }
         },
         error: () => {
@@ -247,7 +330,8 @@ export class FirebaseSync {
         const d = snap.data();
         if (d && Array.isArray(d.collaborators) && !d.collaborators.includes(this.email)) {
           this.hooks.onState("denied");
-          return true;
+          this.invitedPending = true; // meta listener picks up a later invite
+          return;
         }
       }
 
@@ -295,22 +379,24 @@ export class FirebaseSync {
       this.scheduleFlush(50);
 
       // poll for async updates while alone (P2P covers live moments)
+      if (this.pollTimer) clearInterval(this.pollTimer);
       this.pollTimer = setInterval(() => this.poll(), POLL_INTERVAL);
 
-      const flushOnHide = () => {
-        if (document.visibilityState === "hidden") this.flushNow();
-      };
-      document.addEventListener("visibilitychange", flushOnHide);
-      window.addEventListener("online", () => this.scheduleFlush(100));
-      return true;
+      if (!this.docListeners) {
+        this.docListeners = true;
+        const flushOnHide = () => {
+          if (document.visibilityState === "hidden") this.flushNow();
+        };
+        document.addEventListener("visibilitychange", flushOnHide);
+        window.addEventListener("online", () => this.scheduleFlush(100));
+      }
     } catch (e: any) {
-      console.error("[questline] firebase init failed", e);
+      console.error("[questline] firebase startSync failed", e);
       const msg =
         e?.code === "permission-denied"
           ? "Permission denied by Firestore rules — make sure you published the Questline rules and enabled Google sign-in (see README)."
           : e?.message || String(e);
       this.hooks.onState("error", msg);
-      return true; // connected enough to surface the error state
     }
   }
 

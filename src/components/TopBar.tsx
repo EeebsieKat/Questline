@@ -20,8 +20,12 @@ function SyncPill() {
       break;
     case "signed-out":
       color = "#facc15";
-      label = "Sign in for cloud sync";
-      onClick = () => setModal("settings");
+      label = "Sign in with Google";
+      onClick = () => {
+        const fb = useApp.getState().firebase;
+        if (fb) fb.signIn();
+        else setModal("settings");
+      };
       break;
     case "syncing":
       color = "#22d3ee";

@@ -6,6 +6,7 @@ import { USER_COLORS } from "../lib/palette";
 import { exportWorkspace, importWorkspace } from "../lib/exportImport";
 import { downloadFile } from "../lib/util";
 import { connectFirebase } from "./App";
+import { FIREBASE_CONFIG } from "../firebase-config";
 import { bootstrapStarter } from "../lib/bootstrap";
 import { FIRESTORE_RULES } from "../lib/rules";
 import { copyText } from "../lib/util";
@@ -43,7 +44,7 @@ export function SettingsModal() {
       setFirebase(null);
     }
     setCloud("connecting");
-    await connectFirebase(ws);
+    await connectFirebase(ws, { autoSignIn: true });
     setBusy(false);
   };
 
@@ -165,6 +166,12 @@ export function SettingsModal() {
             {sync.cloud === "denied" && "Signed in, but this account isn't invited to this workspace."}
           </div>
 
+          {FIREBASE_CONFIG && !localStorage.getItem("ql-firebase") ? (
+            <div className="text-[11px] px-2.5 py-2 rounded-lg border border-lime-400/30 bg-lime-400/10 text-lime-200 mb-3 leading-relaxed">
+              Cloud sync is built into this deployment — just hit “Sign in with Google” in the
+              top bar. The field below only overrides it with a different Firebase project.
+            </div>
+          ) : null}
           <Field
             label="Firebase web app config"
             hint={
@@ -216,7 +223,7 @@ export function SettingsModal() {
             config → 3) enable <span className="text-dim">Authentication → Google</span> and add{" "}
             <code className="text-accent2">{location.host}</code> to its authorized domains → 4)
             create <span className="text-dim">Firestore Database</span> (production mode) and
-            publish the rules above → 5) paste the config here. Invite teammates from the Share
+            publish the rules above → 5) paste the config here — or bake it in once via src/firebase-config.ts so nobody ever pastes. Invite teammates from the Share
             dialog. Full walkthrough in the README.
           </div>
         </div>
