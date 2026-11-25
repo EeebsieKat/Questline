@@ -1,0 +1,47 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // One Questline workspace per document id.
+    // Access is gated by a collaborator email list — invite people
+    // from the app's Share dialog (owner only, enforced here).
+    match /questline/{wsid} {
+      function signedIn() {
+        return request.auth != null && request.auth.token.email != null;
+      }
+      function isMember() {
+        return signedIn() && request.auth.token.email in resource.data.collaborators;
+      }
+      function isOwner() {
+        return signedIn() && request.auth.token.email == resource.data.ownerEmail;
+      }
+
+      allow read: if isMember();
+      allow create: if signedIn()
+        && request.auth.token.email == request.resource.data.ownerEmail
+        && request.auth.token.email in request.resource.data.collaborators;
+      allow update: if isMember()
+        && request.resource.data.ownerEmail == resource.data.ownerEmail
+        && (request.resource.data.collaborators == resource.data.collaborators || isOwner());
+      allow delete: if false;
+
+      // Append-only Yjs update log (small, batched writes).
+      match /updates/{uid} {
+        function memberOfParent() {
+          return signedIn()
+            && request.auth.token.email in get(/databases/$(database)/documents/questline/$(wsid)).data.collaborators;
+        }
+        allow read: if memberOfParent();
+        allow create: if memberOfParent()
+          && request.resource.data.keys().hasOnly(['u', 't', 'by', 'snap'])
+          && request.resource.data.by == request.auth.token.email;
+        allow update: if false;
+        allow delete: if memberOfParent();
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
