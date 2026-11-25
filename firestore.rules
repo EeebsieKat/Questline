@@ -16,7 +16,12 @@ service cloud.firestore {
         return signedIn() && request.auth.token.email == resource.data.ownerEmail;
       }
 
-      allow read: if isMember();
+      // The very first read of a not-yet-created workspace must resolve to
+      // "not found" instead of permission-denied, otherwise nobody can ever
+      // reach the create branch (resource.data errors on a missing doc).
+      allow get: if !exists(/databases/$(database)/documents/questline/$(wsid))
+        || isMember();
+      allow list: if isMember();
       allow create: if signedIn()
         && request.auth.token.email == request.resource.data.ownerEmail
         && request.auth.token.email in request.resource.data.collaborators;
